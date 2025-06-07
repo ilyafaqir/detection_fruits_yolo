@@ -1,0 +1,184 @@
+import { useMemo } from 'react';
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  Title,
+  Tooltip,
+  Legend,
+  ArcElement
+} from 'chart.js';
+import { Bar, Doughnut } from 'react-chartjs-2';
+import { DetectionResult } from '../types';
+
+// Enregistrer les composants Chart.js nécessaires
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  Title,
+  Tooltip,
+  Legend,
+  ArcElement
+);
+
+interface DetectionStatsProps {
+  detections: DetectionResult[];
+}
+
+const DetectionStats: React.FC<DetectionStatsProps> = ({ detections }) => {
+  const stats = useMemo(() => {
+    const fruitCounts: Record<string, number> = {};
+    const confidenceSum: Record<string, number> = {};
+    let totalDetections = 0;
+
+    detections.forEach(result => {
+      result.detections.forEach(detection => {
+        fruitCounts[detection.name] = (fruitCounts[detection.name] || 0) + 1;
+        confidenceSum[detection.name] = (confidenceSum[detection.name] || 0) + detection.confidence;
+        totalDetections++;
+      });
+    });
+
+    const avgConfidence: Record<string, number> = {};
+    Object.keys(fruitCounts).forEach(fruit => {
+      avgConfidence[fruit] = confidenceSum[fruit] / fruitCounts[fruit];
+    });
+
+    return { fruitCounts, avgConfidence, totalDetections };
+  }, [detections]);
+
+  const barData = {
+    labels: Object.keys(stats.fruitCounts),
+    datasets: [
+      {
+        label: 'Nombre de détections',
+        data: Object.values(stats.fruitCounts),
+        backgroundColor: 'rgba(59, 130, 246, 0.5)',
+        borderColor: 'rgb(59, 130, 246)',
+        borderWidth: 1,
+      },
+    ],
+  };
+
+  const doughnutData = {
+    labels: Object.keys(stats.fruitCounts),
+    datasets: [
+      {
+        data: Object.values(stats.fruitCounts),
+        backgroundColor: [
+          'rgba(59, 130, 246, 0.5)',
+          'rgba(16, 185, 129, 0.5)',
+          'rgba(245, 158, 11, 0.5)',
+          'rgba(239, 68, 68, 0.5)',
+          'rgba(139, 92, 246, 0.5)',
+        ],
+        borderColor: [
+          'rgb(59, 130, 246)',
+          'rgb(16, 185, 129)',
+          'rgb(245, 158, 11)',
+          'rgb(239, 68, 68)',
+          'rgb(139, 92, 246)',
+        ],
+        borderWidth: 1,
+      },
+    ],
+  };
+
+  const chartOptions = {
+    responsive: true,
+    plugins: {
+      legend: {
+        position: 'top' as const,
+      },
+    },
+    scales: {
+      y: {
+        beginAtZero: true,
+        ticks: {
+          stepSize: 1
+        }
+      }
+    }
+  };
+
+  const doughnutOptions = {
+    responsive: true,
+    plugins: {
+      legend: {
+        position: 'top' as const,
+      },
+    }
+  };
+
+  return (
+    <div className="space-y-8 animate-fade-in">
+      <div className="grid md:grid-cols-3 gap-6">
+        <div className="bg-blue-50 p-6 rounded-xl">
+          <h3 className="text-lg font-semibold text-blue-900 mb-2">
+            Total des détections
+          </h3>
+          <p className="text-3xl font-bold text-blue-600">
+            {stats.totalDetections}
+          </p>
+        </div>
+        <div className="bg-green-50 p-6 rounded-xl">
+          <h3 className="text-lg font-semibold text-green-900 mb-2">
+            Types de fruits
+          </h3>
+          <p className="text-3xl font-bold text-green-600">
+            {Object.keys(stats.fruitCounts).length}
+          </p>
+        </div>
+        <div className="bg-orange-50 p-6 rounded-xl">
+          <h3 className="text-lg font-semibold text-orange-900 mb-2">
+            Confiance moyenne
+          </h3>
+          <p className="text-3xl font-bold text-orange-600">
+            {(Object.values(stats.avgConfidence).reduce((a, b) => a + b, 0) / 
+              Object.values(stats.avgConfidence).length * 100).toFixed(1)}%
+          </p>
+        </div>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-8">
+        <div className="bg-white p-6 rounded-xl shadow-sm">
+          <h3 className="text-lg font-semibold mb-4">Distribution des détections</h3>
+          <Bar data={barData} options={chartOptions} />
+        </div>
+        <div className="bg-white p-6 rounded-xl shadow-sm">
+          <h3 className="text-lg font-semibold mb-4">Répartition des fruits</h3>
+          <Doughnut data={doughnutData} options={doughnutOptions} />
+        </div>
+      </div>
+
+      <div className="bg-white p-6 rounded-xl shadow-sm">
+        <h3 className="text-lg font-semibold mb-4">Détails par fruit</h3>
+        <div className="grid gap-4">
+          {Object.entries(stats.fruitCounts).map(([fruit, count]) => (
+            <div
+              key={fruit}
+              className="flex items-center justify-between p-4 bg-gray-50 rounded-lg"
+            >
+              <div>
+                <h4 className="font-medium capitalize">{fruit}</h4>
+                <p className="text-sm text-gray-500">
+                  {count} détection{count > 1 ? 's' : ''}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="font-medium text-blue-600">
+                  {(stats.avgConfidence[fruit] * 100).toFixed(1)}%
+                </p>
+                <p className="text-sm text-gray-500">confiance moyenne</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default DetectionStats; 
