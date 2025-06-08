@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import Webcam from 'react-webcam';
-import { Camera, Upload, RefreshCw, Download } from 'lucide-react';
+import { Camera, Upload, RefreshCw } from 'lucide-react';
 import useLocalStorage from '../hooks/useLocalStorage';
 
 interface Point {
@@ -29,7 +29,6 @@ const Detection = () => {
   const webcamRef = useRef<Webcam>(null);
   const [detectionHistory, setDetectionHistory] = useLocalStorage<DetectionResult[]>('detection-history', []);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const segmentedImageRef = useRef<string | null>(null);
   const [isRealTimeDetection, setIsRealTimeDetection] = useState(false);
   const animationFrameRef = useRef<number | null>(null);
   const lastDetectionTimeRef = useRef<number>(0);
@@ -85,21 +84,8 @@ const Detection = () => {
   };
 
   const saveSegmentedImage = (canvas: HTMLCanvasElement) => {
-    try {
-      // Convertir le canvas en URL de données
-      const segmentedImageUrl = canvas.toDataURL('image/png');
-      segmentedImageRef.current = segmentedImageUrl;
-      
-      // Créer un lien de téléchargement
-      const link = document.createElement('a');
-      link.href = segmentedImageUrl;
-      link.download = `segmented-image-${Date.now()}.png`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    } catch (error) {
-      console.error('Erreur lors de la sauvegarde de l\'image segmentée:', error);
-    }
+    // Fonction désactivée pour éviter l'enregistrement automatique
+    return;
   };
 
   const drawSegmentation = (image: HTMLImageElement, predictions: any[], canvas: HTMLCanvasElement) => {
@@ -204,7 +190,7 @@ const Detection = () => {
       if (imageUrl.startsWith('blob:')) {
         const response = await fetch(imageUrl);
         const blob = await response.blob();
-        finalImageUrl = await new Promise((resolve) => {
+        finalImageUrl = await new Promise<string>((resolve) => {
           const reader = new FileReader();
           reader.onloadend = () => resolve(reader.result as string);
           reader.readAsDataURL(blob);
@@ -222,10 +208,10 @@ const Detection = () => {
         }))
       };
 
-      setDetectionHistory(prev => {
+      setDetectionHistory((prev: DetectionResult[]) => {
         // Vérifier si une détection similaire existe déjà dans les 2 dernières secondes
         const recentDetections = prev.filter(
-          item => Date.now() - item.timestamp < 2000
+          (item: DetectionResult) => Date.now() - item.timestamp < 2000
         );
         if (recentDetections.length === 0) {
           return [newResult, ...prev].slice(0, 20); // Garder les 20 dernières détections
@@ -240,7 +226,6 @@ const Detection = () => {
   const detectRealTime = async (timestamp: number) => {
     if (!webcamRef.current || !canvasRef.current || !isRealTimeDetection) return;
 
-    // Utiliser la fréquence de détection configurable
     if (timestamp - lastDetectionTimeRef.current > detectionFrequency) {
       const imageSrc = webcamRef.current.getScreenshot();
       if (imageSrc) {
@@ -274,7 +259,6 @@ const Detection = () => {
           
           if (canvasRef.current) {
             drawBoundingBox(predictions, canvasRef.current);
-            // Sauvegarder dans l'historique si des fruits sont détectés
             if (predictions.length > 0) {
               await saveToHistory(predictions, imageSrc);
             }
@@ -313,7 +297,6 @@ const Detection = () => {
         imageObj.src = finalImageUrl;
       } else if (imageUrl) {
         imageInput = { type: 'url', value: imageUrl };
-        // Pour les URLs externes, on les garde telles quelles
         finalImageUrl = imageUrl;
         imageObj.src = imageUrl;
       } else {
@@ -462,28 +445,19 @@ const Detection = () => {
   };
 
   useEffect(() => {
-    if (isWebcamActive && isRealTimeDetection) {
-      // Démarrer la détection en temps réel
+    if (isRealTimeDetection) {
       animationFrameRef.current = requestAnimationFrame(detectRealTime);
     } else {
-      // Arrêter la détection
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
-      }
-      // Nettoyer le canvas
-      const ctx = canvasRef.current?.getContext('2d');
-      if (ctx && canvasRef.current) {
-        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
       }
     }
-
     return () => {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [isWebcamActive, isRealTimeDetection]);
+  }, [isRealTimeDetection, detectRealTime]);
 
   // Modifier la fonction qui gère l'activation de la webcam
   const toggleWebcam = () => {
