@@ -20,7 +20,6 @@ interface DetectionResult {
 }
 
 const Detection = () => {
-  const [imageUrl, setImageUrl] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isWebcamActive, setIsWebcamActive] = useState(false);
@@ -32,8 +31,18 @@ const Detection = () => {
   const [isRealTimeDetection, setIsRealTimeDetection] = useState(false);
   const animationFrameRef = useRef<number | null>(null);
   const lastDetectionTimeRef = useRef<number>(0);
-  const [detectionFrequency, setDetectionFrequency] = useState<number>(100); // 100ms = 10fps
+  const [detectionFrequency, setDetectionFrequency] = useState<number>(150); // Augmenté à 150ms pour plus de précision
+  const [minConfidence, setMinConfidence] = useState<number>(0.45); // Augmenté le seuil de confiance
+  const [maxObjects, setMaxObjects] = useState<number>(5); // Limiter le nombre d'objets pour améliorer la performance
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [detectionSummary, setDetectionSummary] = useState<string>('');
+  const [isHighPerformance, setIsHighPerformance] = useState<boolean>(false);
+  const [bufferSize, setBufferSize] = useState<number>(3);
+  const detectionBuffer = useRef<any[]>([]);
+  const processingFrame = useRef<boolean>(false);
+  const fpsCounter = useRef<number>(0);
+  const [currentFPS, setCurrentFPS] = useState<number>(0);
+  const lastFPSUpdate = useRef<number>(Date.now());
 
   const toBase64 = async (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -48,38 +57,100 @@ const Detection = () => {
   };
 
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      setSelectedFile(file);
-      setPreviewUrl(URL.createObjectURL(file));
-      setImageUrl('');
+    try {
+      const file = event.target.files?.[0];
+      if (!file) return;
+
+      // Réinitialiser les états précédents
+      setResult(null);
+      setErrorMessage(null);
       setIsWebcamActive(false);
+      setIsRealTimeDetection(false);
+
+      // Créer une nouvelle URL pour l'aperçu
+      const objectUrl = URL.createObjectURL(file);
       
-      // Analyser immédiatement l'image
-      await handleAnalyze();
+      setSelectedFile(file);
+      setPreviewUrl(objectUrl);
+      
+      // Effacer le canvas avant de charger la nouvelle image
+      const ctx = canvasRef.current?.getContext('2d');
+      if (ctx && canvasRef.current) {
+        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+      }
+
+      // Analyser l'image après un court délai pour s'assurer que l'état est mis à jour
+      setTimeout(() => {
+        handleAnalyze();
+      }, 100);
+
+    } catch (error) {
+      console.error('Erreur lors du chargement du fichier:', error);
+      setErrorMessage('Erreur lors du chargement de l\'image');
     }
   };
 
-  const handleUrlChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const url = event.target.value;
-    setImageUrl(url);
-    setSelectedFile(null);
-    setPreviewUrl(null);
-  };
+  const handleAnalyze = async () => {
+    if (!selectedFile) {
+      setErrorMessage('Veuillez téléverser une image ou utiliser la webcam.');
+      return;
+    }
 
-  const captureWebcam = () => {
-    if (webcamRef.current) {
-      const imageSrc = webcamRef.current.getScreenshot();
-      if (imageSrc) {
-        fetch(imageSrc)
-          .then(res => res.blob())
-          .then(blob => {
-            const file = new File([blob], 'webcam-capture.jpg', { type: 'image/jpeg' });
-            setSelectedFile(file);
-            setPreviewUrl(imageSrc);
-            setImageUrl('');
-          });
+    setIsLoading(true);
+    setErrorMessage(null);
+
+    try {
+      const base64Image = await toBase64(selectedFile);
+      const imageInput = { type: 'base64', value: base64Image };
+      const finalImageUrl = `data:image/jpeg;base64,${base64Image}`;
+      
+      const imageObj = new Image();
+      imageObj.src = finalImageUrl;
+
+      // Attendre que l'image soit chargée
+      await new Promise((resolve, reject) => {
+        imageObj.onload = resolve;
+        imageObj.onerror = () => reject(new Error('Erreur lors du chargement de l\'image'));
+      });
+
+      const response = await fetch('https://serverless.roboflow.com/infer/workflows/wisd-wnpmm/custom-workflow-3', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          api_key: 'JH3zDTC53vZdOK0EYnyo',
+          inputs: {
+            image: imageInput
+          }
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Erreur HTTP ${response.status}`);
       }
+
+      const result = await response.json();
+      const predictions = result.outputs?.[0]?.predictions?.predictions || [];
+
+      if (predictions.length > 0) {
+        await saveToHistory(predictions, finalImageUrl);
+      }
+
+      // Mettre à jour le résumé des détections
+      updateDetectionSummary(predictions);
+
+      if (canvasRef.current) {
+        drawSegmentation(imageObj, predictions, canvasRef.current);
+      }
+
+    } catch (error) {
+      console.error('Erreur lors de l\'analyse:', error);
+      setErrorMessage(error instanceof Error ? error.message : 'Une erreur est survenue lors de l\'analyse');
+      setDetectionSummary('');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -223,11 +294,95 @@ const Detection = () => {
     }
   };
 
+  const updateDetectionSummary = (predictions: any[]) => {
+    if (predictions.length === 0) {
+      setDetectionSummary('Aucun fruit détecté');
+      return;
+    }
+
+    // Compter les types de fruits
+    const fruitCounts: { [key: string]: number } = {};
+    predictions.forEach(pred => {
+      fruitCounts[pred.class] = (fruitCounts[pred.class] || 0) + 1;
+    });
+
+    // Créer le résumé
+    const summary = Object.entries(fruitCounts)
+      .map(([fruit, count]) => `${count} ${fruit}${count > 1 ? 's' : ''}`)
+      .join(', ');
+
+    setDetectionSummary(`Fruits détectés : ${summary}`);
+  };
+
+  const updateFPSCounter = () => {
+    fpsCounter.current++;
+    const now = Date.now();
+    if (now - lastFPSUpdate.current >= 1000) {
+      setCurrentFPS(fpsCounter.current);
+      fpsCounter.current = 0;
+      lastFPSUpdate.current = now;
+    }
+  };
+
+  const processDetectionBuffer = () => {
+    if (detectionBuffer.current.length >= bufferSize) {
+      // Moyenne des prédictions dans le buffer
+      const averagedPredictions = averagePredictions(detectionBuffer.current);
+      detectionBuffer.current = [];
+      return averagedPredictions;
+    }
+    return null;
+  };
+
+  const averagePredictions = (predictions: any[][]) => {
+    const averaged: any[] = [];
+    const groups: { [key: string]: any[] } = {};
+
+    // Grouper les prédictions par classe
+    predictions.flat().forEach(pred => {
+      if (!groups[pred.class]) {
+        groups[pred.class] = [];
+      }
+      groups[pred.class].push(pred);
+    });
+
+    // Calculer la moyenne pour chaque groupe
+    Object.entries(groups).forEach(([className, preds]) => {
+      if (preds.length > 0) {
+        const avgConfidence = preds.reduce((sum, p) => sum + p.confidence, 0) / preds.length;
+        const avgX = preds.reduce((sum, p) => sum + p.x, 0) / preds.length;
+        const avgY = preds.reduce((sum, p) => sum + p.y, 0) / preds.length;
+        const avgWidth = preds.reduce((sum, p) => sum + p.width, 0) / preds.length;
+        const avgHeight = preds.reduce((sum, p) => sum + p.height, 0) / preds.length;
+
+        averaged.push({
+          class: className,
+          confidence: avgConfidence,
+          x: avgX,
+          y: avgY,
+          width: avgWidth,
+          height: avgHeight
+        });
+      }
+    });
+
+    return averaged;
+  };
+
   const detectRealTime = async (timestamp: number) => {
     if (!webcamRef.current || !canvasRef.current || !isRealTimeDetection) return;
 
+    updateFPSCounter();
+
+    if (processingFrame.current) {
+      animationFrameRef.current = requestAnimationFrame(detectRealTime);
+      return;
+    }
+
     if (timestamp - lastDetectionTimeRef.current > detectionFrequency) {
+      processingFrame.current = true;
       const imageSrc = webcamRef.current.getScreenshot();
+      
       if (imageSrc) {
         try {
           setErrorMessage(null);
@@ -246,7 +401,11 @@ const Detection = () => {
                   type: 'base64',
                   value: base64Image
                 }
-              }
+              },
+              confidence: minConfidence,
+              overlap: 0.3,
+              max_objects: maxObjects,
+              min_area: 100
             })
           });
 
@@ -257,19 +416,44 @@ const Detection = () => {
           const result = await response.json();
           const predictions = result.outputs?.[0]?.predictions?.predictions || [];
           
-          if (canvasRef.current) {
-            drawBoundingBox(predictions, canvasRef.current);
-            if (predictions.length > 0) {
-              await saveToHistory(predictions, imageSrc);
+          const filteredPredictions = predictions
+            .filter((pred: any) => pred.confidence >= minConfidence)
+            .sort((a: any, b: any) => b.confidence - a.confidence)
+            .slice(0, maxObjects);
+
+          if (isHighPerformance) {
+            // Mode haute performance : utiliser le buffer
+            detectionBuffer.current.push(filteredPredictions);
+            const averagedPreds = processDetectionBuffer();
+            
+            if (averagedPreds) {
+              if (canvasRef.current) {
+                drawBoundingBox(averagedPreds, canvasRef.current);
+                updateDetectionSummary(averagedPreds);
+                if (averagedPreds.length > 0) {
+                  await saveToHistory(averagedPreds, imageSrc);
+                }
+              }
+            }
+          } else {
+            // Mode normal : afficher directement
+            if (canvasRef.current) {
+              drawBoundingBox(filteredPredictions, canvasRef.current);
+              updateDetectionSummary(filteredPredictions);
+              if (filteredPredictions.length > 0) {
+                await saveToHistory(filteredPredictions, imageSrc);
+              }
             }
           }
         } catch (error) {
           console.error('Erreur de détection:', error);
           setErrorMessage(error instanceof Error ? error.message : 'Erreur de détection');
           setIsRealTimeDetection(false);
+          setDetectionSummary('');
         }
         lastDetectionTimeRef.current = timestamp;
       }
+      processingFrame.current = false;
     }
 
     if (isRealTimeDetection) {
@@ -277,71 +461,62 @@ const Detection = () => {
     }
   };
 
-  const handleAnalyze = async () => {
-    if (!imageUrl && !selectedFile) {
-      alert('Veuillez fournir une URL ou téléverser une image.');
+  const captureWebcam = async () => {
+    if (!webcamRef.current) {
+      setErrorMessage('La webcam n\'est pas active');
       return;
     }
 
-    setIsLoading(true);
-
     try {
-      let imageInput;
-      let imageObj = new Image();
-      let finalImageUrl: string;
+      // Désactiver la détection en temps réel pendant la capture
+      setIsRealTimeDetection(false);
 
-      if (selectedFile) {
-        const base64Image = await toBase64(selectedFile);
-        imageInput = { type: 'base64', value: base64Image };
-        finalImageUrl = `data:image/jpeg;base64,${base64Image}`;
-        imageObj.src = finalImageUrl;
-      } else if (imageUrl) {
-        imageInput = { type: 'url', value: imageUrl };
-        finalImageUrl = imageUrl;
-        imageObj.src = imageUrl;
-      } else {
-        throw new Error('Aucune image sélectionnée');
+      // Prendre la capture
+      const imageSrc = webcamRef.current.getScreenshot();
+      if (!imageSrc) {
+        throw new Error('Impossible de capturer l\'image');
       }
 
+      // Créer un élément image pour la prévisualisation
+      const img = new Image();
+      img.src = imageSrc;
+
+      // Attendre que l'image soit chargée
       await new Promise((resolve, reject) => {
-        imageObj.onload = resolve;
-        imageObj.onerror = () => reject(new Error('Erreur lors du chargement de l\'image'));
+        img.onload = resolve;
+        img.onerror = () => reject(new Error('Erreur lors du chargement de l\'image capturée'));
       });
 
-      const response = await fetch('https://serverless.roboflow.com/infer/workflows/wisd-wnpmm/custom-workflow-3', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify({
-          api_key: 'JH3zDTC53vZdOK0EYnyo',
-          inputs: {
-            image: imageInput
-          }
-        })
-      });
+      // Convertir l'image base64 en fichier
+      const response = await fetch(imageSrc);
+      const blob = await response.blob();
+      const file = new File([blob], `capture-${Date.now()}.jpg`, { type: 'image/jpeg' });
 
-      if (!response.ok) {
-        throw new Error(`Erreur HTTP ${response.status}`);
+      // Mettre à jour les états
+      setSelectedFile(file);
+      setPreviewUrl(imageSrc);
+      setIsWebcamActive(false);
+
+      // Effacer le canvas existant
+      const ctx = canvasRef.current?.getContext('2d');
+      if (ctx && canvasRef.current) {
+        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
       }
 
-      const result = await response.json();
-      const predictions = result.outputs?.[0]?.predictions?.predictions || [];
+      // Analyser automatiquement l'image capturée
+      await handleAnalyze();
 
-      if (predictions.length > 0) {
-        await saveToHistory(predictions, finalImageUrl);
-      }
-
-      if (canvasRef.current) {
-        drawSegmentation(imageObj, predictions, canvasRef.current);
-      }
+      // Afficher un message de succès temporaire
+      setDetectionSummary('Image capturée avec succès !');
+      setTimeout(() => {
+        if (detectionSummary === 'Image capturée avec succès !') {
+          setDetectionSummary('');
+        }
+      }, 2000);
 
     } catch (error) {
-      console.error('Erreur lors de l\'appel à l\'API:', error);
-      setErrorMessage(error instanceof Error ? error.message : 'Une erreur est survenue');
-    } finally {
-      setIsLoading(false);
+      console.error('Erreur lors de la capture:', error);
+      setErrorMessage('Erreur lors de la capture de l\'image');
     }
   };
 
@@ -359,88 +534,118 @@ const Detection = () => {
   };
 
   const resetAll = () => {
-    setImageUrl('');
     setSelectedFile(null);
     setPreviewUrl(null);
     setIsWebcamActive(false);
     setResult(null);
+    setIsRealTimeDetection(false);
+    setErrorMessage(null);
+    setDetectionSummary('');
+    
     // Effacer le canvas
     const ctx = canvasRef.current?.getContext('2d');
     if (ctx && canvasRef.current) {
       ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
     }
+
+    // Réinitialiser l'input file
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    if (fileInput) {
+      fileInput.value = '';
+    }
   };
 
   const drawBoundingBox = (predictions: any[], canvas: HTMLCanvasElement) => {
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx || !webcamRef.current?.video) return;
 
-    // Ajuster la taille du canvas à celle de la vidéo
-    const video = webcamRef.current?.video;
-    if (!video) return;
-
+    const video = webcamRef.current.video;
     const { videoWidth, videoHeight } = video;
     const { width: displayWidth, height: displayHeight } = video.getBoundingClientRect();
 
+    // Définir la taille du canvas pour correspondre exactement à la taille d'affichage
     canvas.width = displayWidth;
     canvas.height = displayHeight;
+
+    // Calculer les facteurs d'échelle
+    const scaleX = displayWidth / videoWidth;
+    const scaleY = displayHeight / videoHeight;
 
     // Effacer le canvas précédent
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     predictions.forEach((pred: any) => {
-      // Calculer les coordonnées de la boîte englobante à partir des points
-      if (!pred.points || pred.points.length === 0) return;
-
-      // Trouver les coordonnées min et max pour créer la boîte englobante
-      const xCoords = pred.points.map((p: Point) => p.x);
-      const yCoords = pred.points.map((p: Point) => p.y);
+      // Utiliser les coordonnées de la boîte englobante avec mise à l'échelle précise
+      const x = pred.x * scaleX;
+      const y = pred.y * scaleY;
       
-      const minX = Math.min(...xCoords);
-      const maxX = Math.max(...xCoords);
-      const minY = Math.min(...yCoords);
-      const maxY = Math.max(...yCoords);
+      // Réduire légèrement la taille de la boîte pour mieux s'adapter à l'objet
+      const reductionFactor = 0.95; // Réduction de 5%
+      const boxWidth = pred.width * scaleX * reductionFactor;
+      const boxHeight = pred.height * scaleY * reductionFactor;
 
-      // Calculer les dimensions de la boîte
-      const width = maxX - minX;
-      const height = maxY - minY;
-
-      // Calculer les facteurs d'échelle
-      const scaleX = displayWidth / videoWidth;
-      const scaleY = displayHeight / videoHeight;
-
-      // Appliquer l'échelle aux coordonnées
-      const scaledX = minX * scaleX;
-      const scaledY = minY * scaleY;
-      const scaledWidth = width * scaleX;
-      const scaledHeight = height * scaleY;
-
-      // Dessiner la boîte englobante
-      ctx.strokeStyle = '#00ff00';
+      // Dessiner un contour plus fin et plus précis avec une couleur qui varie selon la confiance
+      const alpha = Math.max(0.5, pred.confidence); // Minimum 0.5 d'opacité
+      ctx.strokeStyle = `rgba(0, 255, 0, ${alpha})`;
+      ctx.lineWidth = 2;
+      
+      // Dessiner la boîte principale avec un contour double pour plus de précision
+      const boxX = x - boxWidth/2;
+      const boxY = y - boxHeight/2;
+      
+      // Contour externe légèrement plus grand
+      ctx.strokeStyle = `rgba(0, 0, 0, ${alpha * 0.5})`;
       ctx.lineWidth = 3;
-      ctx.strokeRect(scaledX, scaledY, scaledWidth, scaledHeight);
+      ctx.strokeRect(boxX - 1, boxY - 1, boxWidth + 2, boxHeight + 2);
+      
+      // Contour interne précis
+      ctx.strokeStyle = `rgba(0, 255, 0, ${alpha})`;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(boxX, boxY, boxWidth, boxHeight);
+      
+      // Ajouter des points aux coins pour plus de précision
+      const cornerSize = 3; // Réduit la taille des points
+      ctx.fillStyle = '#00ff00';
+      
+      // Coins externes
+      const corners = [
+        [boxX, boxY], // Haut gauche
+        [boxX + boxWidth, boxY], // Haut droite
+        [boxX, boxY + boxHeight], // Bas gauche
+        [boxX + boxWidth, boxY + boxHeight] // Bas droite
+      ];
+      
+      corners.forEach(([cornerX, cornerY]) => {
+        ctx.beginPath();
+        ctx.arc(cornerX, cornerY, cornerSize, 0, Math.PI * 2);
+        ctx.fill();
+      });
 
-      // Ajouter le label avec un fond semi-transparent
+      // Ajouter le label avec le score de confiance
       const confidence = (pred.confidence * 100).toFixed(1);
       const text = `${pred.class} ${confidence}%`;
       
-      ctx.font = 'bold 16px Arial';
+      // Améliorer la lisibilité du texte
+      ctx.font = 'bold 12px Arial';
       const textMetrics = ctx.measureText(text);
-      const padding = 5;
-      const textHeight = 24;
+      const padding = 4;
+      const textHeight = 16;
 
-      // Dessiner le fond du texte
+      // Dessiner un fond semi-transparent pour le texte
       ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
       ctx.fillRect(
-        scaledX,
-        scaledY - textHeight - padding,
+        boxX,
+        boxY - textHeight - padding * 2,
         textMetrics.width + padding * 2,
-        textHeight
+        textHeight + padding
       );
 
-      // Dessiner le texte
+      // Dessiner le texte avec un contour pour une meilleure visibilité
+      ctx.strokeStyle = 'black';
+      ctx.lineWidth = 1.5;
+      ctx.strokeText(text, boxX + padding, boxY - padding - 4);
       ctx.fillStyle = '#00ff00';
-      ctx.fillText(text, scaledX + padding, scaledY - padding - 5);
+      ctx.fillText(text, boxX + padding, boxY - padding - 4);
     });
   };
 
@@ -478,20 +683,7 @@ const Detection = () => {
       <div className="bg-white rounded-xl shadow-sm p-6 mb-8">
         <div className="mb-4">
           <label className="block text-sm font-medium text-gray-700 mb-2">
-            URL de l'image
-          </label>
-          <input
-            type="text"
-            value={imageUrl}
-            onChange={handleUrlChange}
-            placeholder="Entrez l'URL de l'image"
-            className="w-full p-2 border rounded-md"
-          />
-        </div>
-
-        <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Ou utilisez la webcam / téléversez une image
+            Choisissez une méthode de détection
           </label>
           <div className="flex justify-center space-x-4">
             <button
@@ -550,10 +742,10 @@ const Detection = () => {
             </>
           ) : (
             <>
-              {(previewUrl || imageUrl) && (
+              {previewUrl ? (
                 <>
                   <img
-                    src={previewUrl || imageUrl}
+                    src={previewUrl}
                     alt="Preview"
                     className="w-full h-full object-contain"
                   />
@@ -563,10 +755,9 @@ const Detection = () => {
                     style={{ mixBlendMode: 'multiply' }}
                   />
                 </>
-              )}
-              {!previewUrl && !imageUrl && (
+              ) : (
                 <div className="flex items-center justify-center h-full text-gray-400">
-                  Aucune image sélectionnée
+                  Activez la webcam ou chargez une image
                 </div>
               )}
             </>
@@ -577,60 +768,125 @@ const Detection = () => {
           {isWebcamActive && (
             <button
               onClick={captureWebcam}
-              className="btn btn-secondary"
+              className="btn btn-primary"
+              disabled={isLoading}
             >
               <Camera className="h-5 w-5 mr-2" />
               <span>Prendre une photo</span>
             </button>
           )}
 
-          <button
-            onClick={handleAnalyze}
-            disabled={(!selectedFile && !imageUrl) || isLoading}
-            className="btn btn-primary"
-          >
-            {isLoading ? (
-              <>
-                <RefreshCw className="h-5 w-5 animate-spin mr-2" />
-                <span>Analyse en cours...</span>
-              </>
-            ) : (
-              <>
-                <Upload className="h-5 w-5 mr-2" />
-                <span>Analyser</span>
-              </>
-            )}
-          </button>
+          {selectedFile && (
+            <button
+              onClick={handleAnalyze}
+              disabled={isLoading}
+              className="btn btn-primary"
+            >
+              {isLoading ? (
+                <>
+                  <RefreshCw className="h-5 w-5 animate-spin mr-2" />
+                  <span>Analyse en cours...</span>
+                </>
+              ) : (
+                <>
+                  <Upload className="h-5 w-5 mr-2" />
+                  <span>Analyser</span>
+                </>
+              )}
+            </button>
+          )}
         </div>
 
-        {result && (
-          <div className="mt-4">
-            <pre className="bg-gray-100 p-4 rounded-md overflow-auto max-h-96 text-sm">
-              {JSON.stringify(result, null, 2)}
-            </pre>
-          </div>
-        )}
-
-        {isWebcamActive && isRealTimeDetection && (
-          <div className="mt-4">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Fréquence de détection: {Math.round(1000 / detectionFrequency)} FPS
-            </label>
-            <input
-              type="range"
-              min="50"
-              max="1000"
-              step="50"
-              value={detectionFrequency}
-              onChange={(e) => setDetectionFrequency(1000 / parseInt(e.target.value))}
-              className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-            />
+        {detectionSummary && (
+          <div className="mt-4 p-4 bg-green-50 text-green-700 rounded-md font-medium">
+            {detectionSummary}
           </div>
         )}
 
         {errorMessage && (
           <div className="mt-4 p-4 bg-red-100 text-red-700 rounded-md">
             {errorMessage}
+          </div>
+        )}
+
+        {isWebcamActive && isRealTimeDetection && (
+          <div className="mt-4 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Fréquence de détection: {Math.round(1000 / detectionFrequency)} FPS
+              </label>
+              <input
+                type="range"
+                min="50"
+                max="1000"
+                step="50"
+                value={detectionFrequency}
+                onChange={(e) => setDetectionFrequency(1000 / parseInt(e.target.value))}
+                className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Seuil de confiance: {Math.round(minConfidence * 100)}%
+              </label>
+              <input
+                type="range"
+                min="30"
+                max="90"
+                step="5"
+                value={minConfidence * 100}
+                onChange={(e) => setMinConfidence(parseInt(e.target.value) / 100)}
+                className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Nombre maximum d'objets: {maxObjects}
+              </label>
+              <input
+                type="range"
+                min="1"
+                max="10"
+                value={maxObjects}
+                onChange={(e) => setMaxObjects(parseInt(e.target.value))}
+                className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <label className="text-sm font-medium text-gray-700">
+                  Mode haute performance
+                </label>
+                <input
+                  type="checkbox"
+                  checked={isHighPerformance}
+                  onChange={(e) => setIsHighPerformance(e.target.checked)}
+                  className="h-4 w-4 text-blue-600 rounded border-gray-300"
+                />
+              </div>
+              <div className="text-sm text-gray-600">
+                FPS actuel: {currentFPS}
+              </div>
+            </div>
+
+            {isHighPerformance && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Taille du buffer: {bufferSize} frames
+                </label>
+                <input
+                  type="range"
+                  min="2"
+                  max="10"
+                  value={bufferSize}
+                  onChange={(e) => setBufferSize(parseInt(e.target.value))}
+                  className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                />
+              </div>
+            )}
           </div>
         )}
       </div>
