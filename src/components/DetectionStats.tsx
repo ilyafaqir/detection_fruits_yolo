@@ -27,6 +27,44 @@ interface DetectionStatsProps {
   detections: DetectionResult[];
 }
 
+// Palette de couleurs distinctes pour les graphiques
+const chartColors = {
+  backgrounds: [
+    'rgba(255, 99, 132, 0.6)',    // Rose
+    'rgba(54, 162, 235, 0.6)',    // Bleu
+    'rgba(255, 206, 86, 0.6)',    // Jaune
+    'rgba(75, 192, 192, 0.6)',    // Turquoise
+    'rgba(153, 102, 255, 0.6)',   // Violet
+    'rgba(255, 159, 64, 0.6)',    // Orange
+    'rgba(76, 175, 80, 0.6)',     // Vert
+    'rgba(244, 67, 54, 0.6)',     // Rouge
+    'rgba(156, 39, 176, 0.6)',    // Violet foncé
+    'rgba(121, 85, 72, 0.6)',     // Marron
+    'rgba(33, 150, 243, 0.6)',    // Bleu clair
+    'rgba(255, 235, 59, 0.6)',    // Jaune clair
+    'rgba(233, 30, 99, 0.6)',     // Rose foncé
+    'rgba(0, 150, 136, 0.6)',     // Vert-bleu
+    'rgba(158, 158, 158, 0.6)'    // Gris
+  ],
+  borders: [
+    'rgb(255, 99, 132)',    // Rose
+    'rgb(54, 162, 235)',    // Bleu
+    'rgb(255, 206, 86)',    // Jaune
+    'rgb(75, 192, 192)',    // Turquoise
+    'rgb(153, 102, 255)',   // Violet
+    'rgb(255, 159, 64)',    // Orange
+    'rgb(76, 175, 80)',     // Vert
+    'rgb(244, 67, 54)',     // Rouge
+    'rgb(156, 39, 176)',    // Violet foncé
+    'rgb(121, 85, 72)',     // Marron
+    'rgb(33, 150, 243)',    // Bleu clair
+    'rgb(255, 235, 59)',    // Jaune clair
+    'rgb(233, 30, 99)',     // Rose foncé
+    'rgb(0, 150, 136)',     // Vert-bleu
+    'rgb(158, 158, 158)'    // Gris
+  ]
+};
+
 const DetectionStats: React.FC<DetectionStatsProps> = ({ detections }) => {
   const stats = useMemo(() => {
     const fruitCounts: Record<string, number> = {};
@@ -55,8 +93,12 @@ const DetectionStats: React.FC<DetectionStatsProps> = ({ detections }) => {
       {
         label: 'Nombre de détections',
         data: Object.values(stats.fruitCounts),
-        backgroundColor: 'rgba(59, 130, 246, 0.5)',
-        borderColor: 'rgb(59, 130, 246)',
+        backgroundColor: Object.keys(stats.fruitCounts).map(
+          (_, index) => chartColors.backgrounds[index % chartColors.backgrounds.length]
+        ),
+        borderColor: Object.keys(stats.fruitCounts).map(
+          (_, index) => chartColors.borders[index % chartColors.borders.length]
+        ),
         borderWidth: 1,
       },
     ],
@@ -67,20 +109,12 @@ const DetectionStats: React.FC<DetectionStatsProps> = ({ detections }) => {
     datasets: [
       {
         data: Object.values(stats.fruitCounts),
-        backgroundColor: [
-          'rgba(59, 130, 246, 0.5)',
-          'rgba(16, 185, 129, 0.5)',
-          'rgba(245, 158, 11, 0.5)',
-          'rgba(239, 68, 68, 0.5)',
-          'rgba(139, 92, 246, 0.5)',
-        ],
-        borderColor: [
-          'rgb(59, 130, 246)',
-          'rgb(16, 185, 129)',
-          'rgb(245, 158, 11)',
-          'rgb(239, 68, 68)',
-          'rgb(139, 92, 246)',
-        ],
+        backgroundColor: Object.keys(stats.fruitCounts).map(
+          (_, index) => chartColors.backgrounds[index % chartColors.backgrounds.length]
+        ),
+        borderColor: Object.keys(stats.fruitCounts).map(
+          (_, index) => chartColors.borders[index % chartColors.borders.length]
+        ),
         borderWidth: 1,
       },
     ],
